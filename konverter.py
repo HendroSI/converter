@@ -4,6 +4,8 @@ import os
 import geojson
 import xml.etree.ElementTree as ET
 import pandas as pd
+import json
+from bs4 import BeautifulSoup
 from pyproj import Proj
 import geopandas as gpd
 from shapely.geometry import Point, Polygon
@@ -79,6 +81,28 @@ def calculate_area(coords):
 
 
 # Fungsi kml_to_geojson
+def extract_location_from_description(description):
+    try:
+        soup = BeautifulSoup(description, "html.parser")
+        rows = soup.find_all("tr")
+
+        location_data = {}
+        for row in rows:
+            cols = row.find_all("td")
+            if len(cols) == 2:
+                key = cols[0].text.strip().upper()
+                value = cols[1].text.strip()
+                location_data[key] = value
+
+        desa = location_data.get("DESA", None)
+        kecamatan = location_data.get("KECAMATAN", None)
+        kabupaten = location_data.get("KABUPATEN", None)
+        provinsi = location_data.get("PROVINSI", None)
+
+        return desa, kecamatan, kabupaten, provinsi
+    except Exception as e:
+        return None, None, None, None
+
 def kml_to_geojson(kml_file, kmz_filename, gadm_gdf):
     try:
         tree = ET.parse(kml_file)
@@ -93,6 +117,7 @@ def kml_to_geojson(kml_file, kmz_filename, gadm_gdf):
         for placemark in root.findall('.//ns:Placemark', namespace):
             name = placemark.find('./ns:name', namespace).text if placemark.find('./ns:name', namespace) is not None else "Unnamed"
             coordinates = placemark.find('.//ns:coordinates', namespace).text if placemark.find('.//ns:coordinates', namespace) is not None else None
+            description = placemark.find('./ns:description', namespace).text if placemark.find('./ns:description', namespace) is not None else None
 
             if coordinates:
                 coords = coordinates.strip().split(' ')
@@ -102,8 +127,20 @@ def kml_to_geojson(kml_file, kmz_filename, gadm_gdf):
                 if coords:
                     lon, lat = coords[0][0], coords[0][1]
                     easting, northing, utm_zone = latlon_to_utm(lat, lon)
-                    desa, kecamatan, kabupaten, provinsi = reverse_geocode(lat, lon, gadm_gdf)
-                    area_ha = calculate_area(coords)  # Memperbaiki perhitungan luas
+
+                    # Ekstrak lokasi dari deskripsi
+                    desa, kecamatan, kabupaten, provinsi = extract_location_from_description(description) if description else (None, None, None, None)
+
+                    # Jika nama wilayah tidak ada di file KML, gunakan GADM
+                    if desa is None or kecamatan is None or kabupaten is None or provinsi is None:
+                        desa_gadm, kecamatan_gadm, kabupaten_gadm, provinsi_gadm = reverse_geocode(lat, lon, gadm_gdf)
+
+                        desa = desa if desa else desa_gadm
+                        kecamatan = kecamatan if kecamatan else kecamatan_gadm
+                        kabupaten = kabupaten if kabupaten else kabupaten_gadm
+                        provinsi = provinsi if provinsi else provinsi_gadm
+
+                    area_ha = calculate_area(coords)  # Menghitung luas lahan
 
                     feature = {
                         "type": "Feature",
@@ -127,11 +164,10 @@ def kml_to_geojson(kml_file, kmz_filename, gadm_gdf):
                     }
                     geojson_data["features"].append(feature)
 
-        return [(f"{kmz_filename}.geojson", geojson.dumps(geojson_data))]
+        return [(f"{kmz_filename}.geojson", json.dumps(geojson_data))]
     except Exception as e:
         st.error(f"Error converting KML to GeoJSON: {e}")
         return []
-
 
 # Fungsi untuk mengonversi GeoJSON menjadi tabel Excel
 def geojson_to_excel(geojson_files):
@@ -161,7 +197,13 @@ def geojson_to_excel(geojson_files):
                     "Luas (Ha)": properties.get('Luas (Ha)', 'Unknown')
                 })
 
-    return pd.DataFrame(data)
+    df = pd.DataFrame(data)
+
+    # Mengubah nama file GeoJSON agar sesuai dengan kolom 'Name' + '.geojson'
+    df['GeoJSON Filename'] = df['Name'].apply(lambda x: f"{x}.geojson")
+
+    return df
+
 
 # Fungsi utama aplikasi Streamlit
 def main():
